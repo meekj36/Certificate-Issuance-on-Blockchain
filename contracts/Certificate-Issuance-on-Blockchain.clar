@@ -5,6 +5,8 @@
 (define-constant ERR_INVALID_ISSUER (err u103))
 (define-constant ERR_CERTIFICATE_REVOKED (err u104))
 (define-constant ERR_ISSUER_NOT_APPROVED (err u105))
+(define-constant ERR_BATCH_TOO_LARGE (err u106))
+(define-constant ERR_EMPTY_BATCH (err u107))
 
 (define-map approved-issuers principal bool)
 
@@ -226,4 +228,77 @@
 (begin
   (map-set approved-issuers CONTRACT_OWNER true)
   (var-set total-issuers u1)
+)
+
+;; Batch validation function
+(define-public (validate-certificates-batch (certificate-ids (list 25 uint)))
+  (let
+    (
+      (batch-size (len certificate-ids))
+    )
+    (asserts! (> batch-size u0) ERR_EMPTY_BATCH)
+    (asserts! (<= batch-size u25) ERR_BATCH_TOO_LARGE)
+    
+    (ok (map validate-certificate-helper certificate-ids))
+  )
+)
+
+;; Helper function for individual certificate validation
+(define-private (validate-certificate-helper (certificate-id uint))
+  (match (get-certificate certificate-id)
+    certificate
+    {
+      certificate-id: certificate-id,
+      is-valid: (and 
+        (not (get is-revoked certificate)) 
+        (is-approved-issuer (get issuer certificate))
+      ),
+      recipient: (get recipient certificate),
+      issuer: (get issuer certificate),
+      program-name: (get program-name certificate),
+      completion-date: (get completion-date certificate),
+      grade: (get grade certificate),
+      issued-at: (get issued-at certificate),
+      is-revoked: (get is-revoked certificate)
+    }
+    {
+      certificate-id: certificate-id,
+      is-valid: false,
+      recipient: 'SP000000000000000000002Q6VF78,
+      issuer: 'SP000000000000000000002Q6VF78,
+      program-name: "",
+      completion-date: u0,
+      grade: "",
+      issued-at: u0,
+      is-revoked: true
+    }
+  )
+)
+
+;; Read-only function to get batch certificate basic info
+(define-read-only (get-certificates-batch-info (certificate-ids (list 25 uint)))
+  (map get-certificate-basic-info certificate-ids)
+)
+
+;; Helper function for basic certificate info
+(define-private (get-certificate-basic-info (certificate-id uint))
+  (match (get-certificate certificate-id)
+    certificate
+    {
+      certificate-id: certificate-id,
+      exists: true,
+      recipient: (get recipient certificate),
+      issuer: (get issuer certificate),
+      program-name: (get program-name certificate),
+      is-revoked: (get is-revoked certificate)
+    }
+    {
+      certificate-id: certificate-id,
+      exists: false,
+      recipient: 'SP000000000000000000002Q6VF78,
+      issuer: 'SP000000000000000000002Q6VF78,
+      program-name: "",
+      is-revoked: true
+    }
+  )
 )
