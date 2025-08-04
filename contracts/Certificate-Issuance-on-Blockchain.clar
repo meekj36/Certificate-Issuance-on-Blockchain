@@ -8,6 +8,11 @@
 (define-constant ERR_BATCH_TOO_LARGE (err u106))
 (define-constant ERR_EMPTY_BATCH (err u107))
 
+(define-constant ERR_CERTIFICATE_EXPIRED (err u108))
+(define-constant ERR_CERTIFICATE_NOT_EXPIRED (err u109))
+(define-constant ERR_RENEWAL_NOT_ALLOWED (err u110))
+(define-constant ERR_INVALID_EXPIRATION_DATE (err u111))
+
 (define-map approved-issuers principal bool)
 
 (define-map certificates
@@ -300,5 +305,126 @@
       program-name: "",
       is-revoked: true
     }
+  )
+)
+
+
+(define-map certificate-expirations
+  { certificate-id: uint }
+  { 
+    expiration-date: uint,
+    renewable: bool,
+    renewal-count: uint,
+    max-renewals: uint
+  }
+)
+
+(define-map renewal-requests
+  { certificate-id: uint, request-id: uint }
+  {
+    requester: principal,
+    requested-at: uint,
+    approved: bool,
+    processed: bool
+  }
+)
+
+(define-data-var next-renewal-request-id uint u1)
+
+(define-public (issue-certificate-with-expiration
+  (recipient principal)
+  (program-name (string-ascii 100))
+  (completion-date uint)
+  (grade (string-ascii 10))
+  (skills (list 10 (string-ascii 50)))
+  (metadata-uri (optional (string-ascii 200)))
+  (validity-period uint)
+  (renewable bool)
+  (max-renewals uint)
+)
+  (let
+    (
+      (expiration-date (+ stacks-block-height validity-period))
+      (certificate-id (try! (issue-certificate recipient program-name completion-date grade skills metadata-uri)))
+    )
+    (asserts! (> validity-period u0) ERR_INVALID_EXPIRATION_DATE)
+    (map-set certificate-expirations
+      { certificate-id: certificate-id }
+      {
+        expiration-date: expiration-date,
+        renewable: renewable,
+        renewal-count: u0,
+        max-renewals: max-renewals
+      }
+    )
+    (ok certificate-id)
+  )
+)
+
+(define-read-only (is-certificate-expired (certificate-id uint))
+  (match (map-get? certificate-expirations { certificate-id: certificate-id })
+    expiration-data (>= stacks-block-height (get expiration-date expiration-data))
+    false
+  )
+)
+
+(define-read-only (get-certificate-expiration (certificate-id uint))
+  (map-get? certificate-expirations { certificate-id: certificate-id })
+)
+
+(define-public (request-certificate-renewal (certificate-id uint))
+  (let
+    (
+      (certificate (unwrap! (get-certificate certificate-id) ERR_CERTIFICATE_NOT_FOUND))
+      (expiration-data (unwrap! (get-certificate-expiration certificate-id) ERR_CERTIFICATE_NOT_FOUND))
+      (request-id (var-get next-renewal-request-id))
+    )
+    (asserts! (is-eq tx-sender (get recipient certificate)) ERR_UNAUTHORIZED)
+    (asserts! (is-certificate-expired certificate-id) ERR_CERTIFICATE_NOT_EXPIRED)
+    (asserts! (get renewable expiration-data) ERR_RENEWAL_NOT_ALLOWED)
+    (asserts! (< (get renewal-count expiration-data) (get max-renewals expiration-data)) ERR_RENEWAL_NOT_ALLOWED)
+    
+    (map-set renewal-requests
+      { certificate-id: certificate-id, request-id: request-id }
+      {
+        requester: tx-sender,
+        requested-at: stacks-block-height,
+        approved: false,
+        processed: false
+      }
+    )
+    
+    (var-set next-renewal-request-id (+ request-id u1))
+    (ok request-id)
+  )
+)
+
+(define-public (approve-renewal (certificate-id uint) (request-id uint) (new-validity-period uint))
+  (let
+    (
+      (certificate (unwrap! (get-certificate certificate-id) ERR_CERTIFICATE_NOT_FOUND))
+      (renewal-request (unwrap! (map-get? renewal-requests { certificate-id: certificate-id, request-id: request-id }) ERR_CERTIFICATE_NOT_FOUND))
+      (expiration-data (unwrap! (get-certificate-expiration certificate-id) ERR_CERTIFICATE_NOT_FOUND))
+    )
+    (asserts! (is-eq tx-sender (get issuer certificate)) ERR_UNAUTHORIZED)
+    (asserts! (not (get processed renewal-request)) ERR_CERTIFICATE_ALREADY_EXISTS)
+    (asserts! (> new-validity-period u0) ERR_INVALID_EXPIRATION_DATE)
+    
+    (map-set renewal-requests
+      { certificate-id: certificate-id, request-id: request-id }
+      (merge renewal-request { approved: true, processed: true })
+    )
+    
+    (map-set certificate-expirations
+      { certificate-id: certificate-id }
+      {
+        expiration-date: (+ stacks-block-height new-validity-period),
+        renewable: (get renewable expiration-data),
+        renewal-count: (+ (get renewal-count expiration-data) u1),
+        max-renewals: (get max-renewals expiration-data)
+      }
+    )
+    
+    (ok true)
   )
 )
