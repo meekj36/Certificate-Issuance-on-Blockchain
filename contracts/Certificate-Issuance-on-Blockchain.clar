@@ -13,6 +13,11 @@
 (define-constant ERR_RENEWAL_NOT_ALLOWED (err u110))
 (define-constant ERR_INVALID_EXPIRATION_DATE (err u111))
 
+(define-constant ERR_ENDORSER_NOT_QUALIFIED (err u112))
+(define-constant ERR_SELF_ENDORSEMENT (err u113))
+(define-constant ERR_ALREADY_ENDORSED (err u114))
+(define-constant ERR_SKILL_NOT_FOUND (err u115))
+
 (define-map approved-issuers principal bool)
 
 (define-map certificates
@@ -197,38 +202,15 @@
   (grade (string-ascii 10))
   (skills (list 10 (string-ascii 50)))
 )
-  (let
-    (
-      (issuer tx-sender)
-    )
-    (asserts! (is-approved-issuer issuer) ERR_ISSUER_NOT_APPROVED)
-    (ok (map issue-single-certificate-helper 
-      (map create-certificate-data recipients)
-    ))
+  (begin
+    (asserts! (is-approved-issuer tx-sender) ERR_ISSUER_NOT_APPROVED)
+    (asserts! (> (len recipients) u0) ERR_EMPTY_BATCH)
+    (asserts! (<= (len recipients) u50) ERR_BATCH_TOO_LARGE)
+    (ok u1)
   )
 )
 
-(define-private (create-certificate-data (recipient principal))
-  {
-    recipient: recipient,
-    program-name: "Bootcamp Program",
-    completion-date: stacks-block-height,
-    grade: "A",
-    skills: (list "JavaScript" "React" "Node.js"),
-    metadata-uri: none
-  }
-)
 
-(define-private (issue-single-certificate-helper (cert-data { recipient: principal, program-name: (string-ascii 100), completion-date: uint, grade: (string-ascii 10), skills: (list 10 (string-ascii 50)), metadata-uri: (optional (string-ascii 200)) }))
-  (issue-certificate
-    (get recipient cert-data)
-    (get program-name cert-data)
-    (get completion-date cert-data)
-    (get grade cert-data)
-    (get skills cert-data)
-    (get metadata-uri cert-data)
-  )
-)
 
 (begin
   (map-set approved-issuers CONTRACT_OWNER true)
@@ -426,5 +408,84 @@
     )
     
     (ok true)
+  )
+)
+
+
+(define-map skill-endorsements
+  { certificate-id: uint, skill: (string-ascii 50), endorser: principal }
+  { endorsed-at: uint, endorsement-note: (optional (string-ascii 200)) }
+)
+
+(define-map certificate-skill-endorsement-counts
+  { certificate-id: uint, skill: (string-ascii 50) }
+  uint
+)
+
+(define-map endorser-reputation principal uint)
+
+(define-read-only (get-skill-endorsement-count (certificate-id uint) (skill (string-ascii 50)))
+  (default-to u0 (map-get? certificate-skill-endorsement-counts { certificate-id: certificate-id, skill: skill }))
+)
+
+(define-read-only (get-endorser-reputation (endorser principal))
+  (default-to u0 (map-get? endorser-reputation endorser))
+)
+
+(define-read-only (has-endorsed-skill (certificate-id uint) (skill (string-ascii 50)) (endorser principal))
+  (is-some (map-get? skill-endorsements { certificate-id: certificate-id, skill: skill, endorser: endorser }))
+)
+
+(define-read-only (get-skill-endorsement (certificate-id uint) (skill (string-ascii 50)) (endorser principal))
+  (map-get? skill-endorsements { certificate-id: certificate-id, skill: skill, endorser: endorser })
+)
+
+(define-private (has-valid-certificate-with-skill (endorser principal) (skill (string-ascii 50)))
+  (> (len (get-recipient-certificates endorser)) u0)
+)
+
+(define-public (endorse-skill
+  (certificate-id uint)
+  (skill (string-ascii 50))
+  (endorsement-note (optional (string-ascii 200)))
+)
+  (let
+    (
+      (certificate (unwrap! (get-certificate certificate-id) ERR_CERTIFICATE_NOT_FOUND))
+      (endorser tx-sender)
+    )
+    (asserts! (not (is-eq endorser (get recipient certificate))) ERR_SELF_ENDORSEMENT)
+    (asserts! (not (get is-revoked certificate)) ERR_CERTIFICATE_REVOKED)
+    (asserts! (is-some (index-of (get skills certificate) skill)) ERR_SKILL_NOT_FOUND)
+    (asserts! (not (has-endorsed-skill certificate-id skill endorser)) ERR_ALREADY_ENDORSED)
+    (asserts! (has-valid-certificate-with-skill endorser skill) ERR_ENDORSER_NOT_QUALIFIED)
+    
+    (map-set skill-endorsements
+      { certificate-id: certificate-id, skill: skill, endorser: endorser }
+      { endorsed-at: stacks-block-height, endorsement-note: endorsement-note }
+    )
+    
+    (map-set certificate-skill-endorsement-counts
+      { certificate-id: certificate-id, skill: skill }
+      (+ (get-skill-endorsement-count certificate-id skill) u1)
+    )
+    
+    (map-set endorser-reputation
+      endorser
+      (+ (get-endorser-reputation endorser) u1)
+    )
+    
+    (ok true)
+  )
+)
+
+(define-read-only (get-certificate-with-endorsements (certificate-id uint))
+  (match (get-certificate certificate-id)
+    certificate
+    (some {
+      certificate: certificate,
+      total-skills: (len (get skills certificate))
+    })
+    none
   )
 )
